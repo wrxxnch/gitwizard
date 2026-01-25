@@ -3,12 +3,13 @@ import subprocess
 import sys
 from datetime import datetime
 
+TMP_REMOTE = "__wizard_tmp__"
+
 # =============================
 # helpers
 # =============================
 
 def run(cmd, cwd=None, check=True):
-    print(f"\n[{cwd or os.getcwd()}]$ {cmd}")
     result = subprocess.run(
         cmd, shell=True, text=True,
         cwd=cwd,
@@ -20,77 +21,122 @@ def run(cmd, cwd=None, check=True):
     if result.stderr:
         print(result.stderr)
     if check and result.returncode != 0:
-        sys.exit("❌ Erro ao executar comando.")
+        raise RuntimeError("Erro ao executar comando")
     return result.stdout.strip()
 
 def is_git_repo(path):
     return os.path.isdir(os.path.join(path, ".git"))
 
-def pick_repo(prompt):
-    path = input(prompt).strip()
-    if not path:
-        return None
-    if not os.path.isdir(path):
-        print("❌ Diretório não existe")
-        return None
-    if not is_git_repo(path):
-        print("❌ Não é um repositório git")
-        return None
-    return os.path.abspath(path)
+def list_remotes(repo):
+    out = run("git remote", repo)
+    return out.splitlines() if out else []
 
 def current_branch(repo):
     return run("git branch --show-current", repo)
 
-def current_commit(repo):
-    return run("git rev-parse HEAD", repo)
-
 def backup_branch(repo):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    branch = current_branch(repo)
-    name = f"backup/{branch}_{ts}"
+    name = f"backup/{current_branch(repo)}_{ts}"
     run(f"git branch {name}", repo)
     print(f"🛟 Backup criado: {name}")
-    return name
 
 # =============================
-# flows
+# repo comparado
 # =============================
 
-def diff_repos(repo_a, repo_b):
-    ref_a = input("Ref do repo ATIVO (ex: HEAD): ")
-    ref_b = input("Ref do repo COMPARADO (ex: main): ")
+def setup_compare_remote(repo):
+    remotes = list_remotes(repo)
 
-    tmp = "__wizard_tmp__"
+    print("\nRepo comparado:")
+    print("• URL")
+    print("• nome de remote")
+    print("• ENTER vazio → usar <origin>")
 
-    run(f"git remote remove {tmp}", repo_a, check=False)
-    run(f"git remote add {tmp} {repo_b}", repo_a)
-    run(f"git fetch {tmp}")
+    src = input("URL / remote / ENTER: ").strip()
 
-    run(f"git diff {ref_a} {tmp}/{ref_b}", repo_a)
+    if not src:
+        if "origin" not in remotes:
+            raise RuntimeError("origin não existe")
+        src = "origin"
 
-def cherry_pick(repo_a):
+    # URL
+    if "://" in src or src.startswith("git@"):
+        run(f"git remote remove {TMP_REMOTE}", repo, check=False)
+        run(f"git remote add {TMP_REMOTE} {src}", repo)
+        remote = TMP_REMOTE
+    else:
+        if src not in remotes:
+            raise RuntimeError(f"remote '{src}' não existe")
+        remote = src
+
+    run(f"git fetch {remote}", repo)
+    return remote
+
+def list_remote_branches(repo, remote):
+    out = run(f"git branch -r", repo)
+    branches = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith(f"{remote}/") and "->" not in line:
+            branches.append(line.replace(f"{remote}/", ""))
+    return branches
+
+def select_branch(branches):
+    print("\nBranches disponíveis:")
+    for i, b in enumerate(branches, 1):
+        print(f"{i}) {b}")
+
+    choice = input("Escolha (número ou nome): ").strip()
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if idx < 0 or idx >= len(branches):
+            raise RuntimeError("Número inválido")
+        return branches[idx]
+
+    if choice in branches:
+        return choice
+
+    raise RuntimeError("Branch inválido")
+
+# =============================
+# actions
+# =============================
+
+def diff_flow(repo):
+    remote = setup_compare_remote(repo)
+    branches = list_remote_branches(repo, remote)
+    branch = select_branch(branches)
+
+    ref = input("Ref local (ENTER = HEAD): ").strip() or "HEAD"
+    run(f"git diff {ref} {remote}/{branch}", repo)
+
+def cherry_pick_flow(repo):
     commits = input("Commit(s) para cherry-pick: ")
-    backup_branch(repo_a)
-    run(f"git cherry-pick {commits}", repo_a, check=False)
+    backup_branch(repo)
+    run(f"git cherry-pick {commits}", repo, check=False)
 
-    print("⚠️ Conflito?")
+    print("⚠️ Conflitos?")
     print("  git cherry-pick --continue")
     print("  git cherry-pick --abort")
 
-def merge(repo_a):
-    branch = input("Branch para merge: ")
-    backup_branch(repo_a)
-    run(f"git merge --no-ff {branch}", repo_a, check=False)
+def merge_flow(repo):
+    remote = setup_compare_remote(repo)
+    branches = list_remote_branches(repo, remote)
+    branch = select_branch(branches)
 
-    print("⚠️ Se der ruim:")
+    backup_branch(repo)
+    run(f"git merge --no-ff {remote}/{branch}", repo, check=False)
+
+    print("⚠️ Se der conflito:")
     print("  git merge --abort")
 
-def revert(repo_a):
+def revert_flow(repo):
     commit = input("Commit para voltar: ")
-    run(f"git reset --hard {commit}", repo_a)
+    run(f"git reset --hard {commit}", repo)
     print("⏪ Revertido.")
 
-def log(repo):
+def log_flow(repo):
     run("git --no-pager log --oneline --graph --decorate -20", repo)
 
 # =============================
@@ -99,59 +145,45 @@ def log(repo):
 
 def menu():
     print("""
-🧙 Git Wizard (Multi-Repo)
-=========================
-1) Trocar repo ATIVO (meu)
-2) Trocar repo COMPARADO
-3) Diff entre repos
-4) Cherry-pick (repo ativo)
-5) Merge (repo ativo)
-6) Reverter commit (repo ativo)
-7) Log resumido
+🧙 Git Wizard (URL + Remote + Branch Selector)
+=============================================
+1) Diff com repo comparado
+2) Merge seguro de branch
+3) Cherry-pick de commits
+4) Reverter para commit
+5) Log resumido
 0) Sair
 """)
 
 def main():
-    repo_active = pick_repo("Caminho do repo ATIVO (meu): ")
-    repo_compare = pick_repo("Caminho do repo COMPARADO: ")
+    repo = os.getcwd()
+    if not is_git_repo(repo):
+        sys.exit("❌ Execute dentro de um repositório git")
 
-    if not repo_active:
-        sys.exit("❌ Repo ativo obrigatório.")
-
-    print("\n📦 Repo ativo:", repo_active)
-    print("🌿 Branch:", current_branch(repo_active))
-    print("📌 Commit:", current_commit(repo_active))
-
-    if repo_compare:
-        print("\n📦 Repo comparado:", repo_compare)
-        print("🌿 Branch:", current_branch(repo_compare))
-        print("📌 Commit:", current_commit(repo_compare))
+    print("📦 Repo ativo:", repo)
+    print("🌿 Branch:", current_branch(repo))
 
     while True:
         menu()
         c = input("Escolha: ").strip()
 
-        if c == "1":
-            repo_active = pick_repo("Novo repo ATIVO: ")
-        elif c == "2":
-            repo_compare = pick_repo("Novo repo COMPARADO: ")
-        elif c == "3":
-            if not repo_compare:
-                print("❌ Defina o repo comparado primeiro.")
+        try:
+            if c == "1":
+                diff_flow(repo)
+            elif c == "2":
+                merge_flow(repo)
+            elif c == "3":
+                cherry_pick_flow(repo)
+            elif c == "4":
+                revert_flow(repo)
+            elif c == "5":
+                log_flow(repo)
+            elif c == "0":
+                break
             else:
-                diff_repos(repo_active, repo_compare)
-        elif c == "4":
-            cherry_pick(repo_active)
-        elif c == "5":
-            merge(repo_active)
-        elif c == "6":
-            revert(repo_active)
-        elif c == "7":
-            log(repo_active)
-        elif c == "0":
-            break
-        else:
-            print("❌ Opção inválida")
+                print("❌ Opção inválida")
+        except Exception as e:
+            print("❌", e)
 
 if __name__ == "__main__":
     main()

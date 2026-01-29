@@ -4,276 +4,196 @@ import sys
 import json
 import shutil
 import subprocess
-import re
 import urllib.request
-import hashlib
+from hashlib import sha256
 
 # ================= CONFIG =================
 
-TMP_ROOT = ".merge_wizard_tmp"
-CFG_FILE = ".merge_wizard.json"
-
 SCRIPT_REMOTE_RAW = "https://raw.githubusercontent.com/wrxxnch/gitwizard/main/merge.py"
+CONFIG_FILE = ".gitwizard.json"
+TMP_DIR = ".merge_wizard_tmp"
 
-# ================= UI =================
+# ================= UTILS =================
 
-def banner():
-    print("""
-========================================
-🧙 MERGE WIZARD
-========================================
-* Local / GitHub / Codeberg
-* Branch / Tag / Branch vs Branch
-* Configuração persistente
-* Auto-update contínuo
-""")
+def clear():
+    os.system("cls" if os.name == "nt" else "clear")
 
-def menu(title, options, allow_exit=True):
+def pause():
+    input("\nENTER para continuar...")
+
+def sha(data):
+    return sha256(data).hexdigest()
+
+def menu(title, options):
     print("\n" + title)
-
-    if allow_exit:
-        print("0) ❌ Sair")
-
     for i, opt in enumerate(options, 1):
         print(f"{i}) {opt}")
-
-    lookup = {opt.lower(): i for i, opt in enumerate(options, 1)}
+    print("0) ❌ Sair")
 
     while True:
-        c = input("> ").strip().lower()
-
-        if allow_exit and c in ("0", "sair", "exit", "q", "quit"):
-            sys.exit(0)
-
-        if c.isdigit():
-            n = int(c)
-            if 1 <= n <= len(options):
-                return n
-        else:
-            for k, v in lookup.items():
-                if c in k:
-                    return v
-
-        print("❌ Opção inválida")
+        try:
+            c = int(input("> "))
+            if 0 <= c <= len(options):
+                return c
+        except:
+            pass
 
 def ask(msg, default=None):
-    if default is not None and default != "":
+    if default:
         v = input(f"{msg} [{default}]: ").strip()
         return v if v else default
-    return input(msg + ": ").strip()
+    return input(f"{msg}: ").strip()
 
-def confirm(msg, default=False):
-    d = "S/n" if default else "s/N"
-    r = input(f"{msg} [{d}]: ").strip().lower()
-    if not r:
-        return default
-    return r.startswith("s")
-
-# ================= CONFIG FILE =================
-
-def load_cfg():
-    if os.path.exists(CFG_FILE):
-        try:
-            with open(CFG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return None
-    return None
-
-def save_cfg(cfg):
-    with open(CFG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-
-# ================= AUTO UPDATE (SEM VERSÃO) =================
-
-def sha256(data: bytes):
-    return hashlib.sha256(data).hexdigest()
+# ================= UPDATE =================
 
 def check_update(force=False):
     try:
         with urllib.request.urlopen(SCRIPT_REMOTE_RAW, timeout=8) as r:
-            remote_data = r.read()
-
+            remote = r.read()
         with open(sys.argv[0], "rb") as f:
-            local_data = f.read()
+            local = f.read()
 
-        if sha256(remote_data) == sha256(local_data):
+        if sha(remote) == sha(local):
             if force:
                 print("✔ Script já está atualizado")
             return False, None
 
-        return True, remote_data
+        return True, remote
     except:
         if force:
             print("⚠ Não foi possível verificar atualização")
         return False, None
 
-
-def apply_update(remote_data):
+def apply_update(remote):
     with open(sys.argv[0], "wb") as f:
-        f.write(remote_data)
-
+        f.write(remote)
     print("✅ Script atualizado. Reiniciando...")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-
 # ================= GIT =================
 
-def run(cmd, cwd=None):
-    return subprocess.check_output(cmd, cwd=cwd, text=True, stderr=subprocess.DEVNULL)
+def git(cmd, cwd=None):
+    subprocess.check_call(["git"] + cmd, cwd=cwd)
 
-def parse_git_url(url):
-    m = re.match(r"(https?://[^/]+/[^/]+/[^/]+)/src/branch/([^/]+)", url)
-    if m:
-        return m.group(1) + ".git", m.group(2)
-
-    m = re.match(r"(https?://github\.com/[^/]+/[^/]+)/tree/([^/]+)", url)
-    if m:
-        return m.group(1) + ".git", m.group(2)
-
-    return url, None
-
-def clone_repo(url):
-    os.makedirs(TMP_ROOT, exist_ok=True)
-    name = os.path.basename(url.rstrip("/")).replace(".git", "")
-    path = os.path.join(TMP_ROOT, name)
-
-    if os.path.exists(path):
-        shutil.rmtree(path)
-
-    print(f"🌐 Clonando {url}")
-    try:
-        subprocess.check_call(["git", "clone", url, path])
-    except:
-        print("❌ Falha ao clonar repositório")
-        return None
-
-    return os.path.abspath(path)
+def clone_repo(url, dest):
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    git(["clone", url, dest])
 
 def checkout(repo, ref):
-    print(f"🔀 Checkout: {ref}")
-    try:
-        subprocess.check_call(["git", "checkout", ref], cwd=repo)
-        return True
-    except:
-        try:
-            subprocess.check_call(
-                ["git", "checkout", "-B", ref, f"origin/{ref}"],
-                cwd=repo
-            )
-            return True
-        except:
-            print(f"❌ Branch/Tag '{ref}' não encontrada")
-            return False
+    if ref:
+        git(["checkout", ref], cwd=repo)
+
+# ================= SOURCES =================
+
+def get_source(label, cfg=None):
+    print(f"\n📌 Selecionar {label}")
+
+    t = menu(
+        f"Tipo de {label}",
+        ["Caminho local", "URL Git (GitHub / Codeberg)"]
+    )
+
+    if t == 0:
+        sys.exit(0)
+
+    if t == 1:
+        path = ask("Digite o caminho local", cfg.get(f"{label}_path") if cfg else None)
+        return {"type": "local", "path": path}
+
+    url = ask("Digite a URL do repositório git", cfg.get(f"{label}_url") if cfg else None)
+    ref = ask("Branch / tag / commit (opcional)", cfg.get(f"{label}_ref") if cfg else "")
+
+    dest = os.path.join(TMP_DIR, label.lower())
+    print(f"🌐 Clonando {url}")
+    clone_repo(url, dest)
+    checkout(dest, ref)
+
+    return {"type": "git", "url": url, "ref": ref, "path": dest}
 
 # ================= MERGE =================
 
-def read_file(p):
-    try:
-        with open(p, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except:
-        return ""
-
-def write_file(p, c):
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(c)
-
-def merge(base, source, output):
-    shutil.copytree(base, output)
-    copied = merged = 0
-
-    for root, _, files in os.walk(source):
-        rel = os.path.relpath(root, source)
-        dst_dir = output if rel == "." else os.path.join(output, rel)
+def merge_dirs(base, src):
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        target = os.path.join(base, rel)
+        os.makedirs(target, exist_ok=True)
 
         for f in files:
-            s = os.path.join(root, f)
-            d = os.path.join(dst_dir, f)
+            sp = os.path.join(root, f)
+            tp = os.path.join(target, f)
 
-            st = read_file(s)
-            if not os.path.exists(d):
-                write_file(d, st)
-                copied += 1
-            else:
-                bt = read_file(d)
-                if bt != st:
-                    write_file(
-                        d,
-                        "-- >>> BASE\n" + bt +
-                        "\n-- === NOVO ===\n" + st +
-                        "\n-- <<< FIM\n"
-                    )
-                    merged += 1
-
-    print(f"\n📊 Copiados : {copied}")
-    print(f"📊 Mesclados: {merged}")
+            if not os.path.exists(tp):
+                shutil.copy2(sp, tp)
 
 # ================= WIZARD =================
 
 def wizard(cfg):
-    print("\n📝 Revisar opções (Enter mantém valor atual)\n")
+    base = get_source("BASE", cfg)
+    src  = get_source("ORIGEM", cfg)
 
-    cfg["mode"] = ask("Modo (1=normal, 2=branch vs branch)", cfg.get("mode", "1"))
-    cfg["base"] = ask("BASE (caminho ou URL)", cfg.get("base"))
-    cfg["base_ref"] = ask("BASE branch/tag", cfg.get("base_ref", ""))
+    cfg.update({
+        "BASE_type": base["type"],
+        "BASE_path": base["path"],
+        "ORIGEM_type": src["type"],
+        "ORIGEM_path": src["path"],
+        "ORIGEM_url": src.get("url"),
+        "ORIGEM_ref": src.get("ref"),
+    })
 
-    cfg["source"] = ask("ORIGEM (caminho ou URL)", cfg.get("source"))
-    cfg["source_ref"] = ask("ORIGEM branch/tag", cfg.get("source_ref"))
-
-    cfg["output"] = ask("Pasta de saída", cfg.get("output", "merge_test"))
+    print("\n🔀 Mesclando arquivos...")
+    merge_dirs(base["path"], src["path"])
+    print("✅ Merge concluído")
 
     return cfg
 
 # ================= MAIN =================
 
 def main():
-    banner()
-    auto_update()
+    clear()
 
-    cfg = load_cfg()
+    has_update, remote = check_update(False)
+    if has_update:
+        print("🔔 Atualização disponível (use a opção no menu)")
 
-    if cfg:
+    cfg = {}
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+
         c = menu(
             "Configuração anterior encontrada",
             [
                 "Usar opções anteriores (editar uma a uma)",
-                "Novo merge do zero"
+                "Novo merge do zero",
+                "🔄 Atualizar script agora"
             ]
         )
+
+        if c == 0:
+            return
+
+        if c == 3:
+            u, r = check_update(True)
+            if u:
+                apply_update(r)
+            pause()
+            return
 
         if c == 1:
             cfg = wizard(cfg)
         else:
             cfg = wizard({})
+
     else:
         cfg = wizard({})
 
-    save_cfg(cfg)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
 
-    base_url, base_ref = parse_git_url(cfg["base"])
-    src_url, src_ref = parse_git_url(cfg["source"])
+    pause()
 
-    base = clone_repo(base_url) if base_url.startswith("http") else cfg["base"]
-    source = clone_repo(src_url) if src_url.startswith("http") else cfg["source"]
-
-    if base_ref:
-        checkout(base, base_ref)
-    if src_ref:
-        checkout(source, src_ref)
-
-    if os.path.exists(cfg["output"]):
-        if confirm("Pasta existe. Apagar?"):
-            shutil.rmtree(cfg["output"])
-        else:
-            return
-
-    if confirm("Confirmar merge?", True):
-        merge(base, source, cfg["output"])
-
-    if os.path.exists(TMP_ROOT) and confirm("Apagar temporários?", True):
-        shutil.rmtree(TMP_ROOT)
+# ================= START =================
 
 if __name__ == "__main__":
     main()

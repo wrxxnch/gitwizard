@@ -227,5 +227,5 @@ def main():
         shutil.rmtree(TMP_ROOT)
         print("✔ Temporários removidos")
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()

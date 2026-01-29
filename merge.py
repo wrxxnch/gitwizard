@@ -121,7 +121,28 @@ def list_tags(repo):
 
 def checkout(repo, ref):
     print(f"🔀 Checkout: {ref}")
-    subprocess.check_call(["git", "checkout", ref], cwd=repo)
+
+    # tentativa direta
+    try:
+        subprocess.check_call(["git", "checkout", ref], cwd=repo)
+        return
+    except subprocess.CalledProcessError:
+        pass
+
+    # tentativa via origin/<branch>
+    try:
+        subprocess.check_call(
+            ["git", "checkout", "-B", ref, f"origin/{ref}"],
+            cwd=repo
+        )
+        return
+    except subprocess.CalledProcessError:
+        pass
+
+    print(f"❌ Branch ou tag '{ref}' não encontrada")
+    print("👉 Dica: verifique se o nome está correto ou se é remoto")
+    return
+
 
 # ---------------- Merge core ----------------
 

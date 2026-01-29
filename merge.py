@@ -6,26 +6,26 @@ import shutil
 import subprocess
 import re
 import urllib.request
+import hashlib
 
 # ================= CONFIG =================
 
 TMP_ROOT = ".merge_wizard_tmp"
 CFG_FILE = ".merge_wizard.json"
 
-SCRIPT_REPO_RAW = "https://raw.githubusercontent.com/wrxxnch/gitwizard/main/merge.py"
-SCRIPT_VERSION = "2.3"
+SCRIPT_REMOTE_RAW = "https://raw.githubusercontent.com/wrxxnch/gitwizard/main/merge.py"
 
 # ================= UI =================
 
 def banner():
-    print(f"""
+    print("""
 ========================================
-🧙 MERGE WIZARD v{SCRIPT_VERSION}
+🧙 MERGE WIZARD
 ========================================
 * Local / GitHub / Codeberg
 * Branch / Tag / Branch vs Branch
-* Config persistente
-* Auto-update
+* Configuração persistente
+* Auto-update automático
 """)
 
 def menu(title, options, allow_exit=True):
@@ -57,14 +57,14 @@ def menu(title, options, allow_exit=True):
         print("❌ Opção inválida")
 
 def ask(msg, default=None):
-    if default:
+    if default is not None:
         v = input(f"{msg} [{default}]: ").strip()
         return v if v else default
     return input(msg + ": ").strip()
 
 def confirm(msg, default=False):
     d = "S/n" if default else "s/N"
-    r = input(f"{msg} [{d}]: ").lower().strip()
+    r = input(f"{msg} [{d}]: ").strip().lower()
     if not r:
         return default
     return r.startswith("s")
@@ -73,32 +73,43 @@ def confirm(msg, default=False):
 
 def load_cfg():
     if os.path.exists(CFG_FILE):
-        with open(CFG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(CFG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return None
     return None
 
 def save_cfg(cfg):
     with open(CFG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-# ================= AUTO UPDATE =================
+# ================= AUTO UPDATE (SEM VERSÃO) =================
+
+def sha256(data: bytes):
+    return hashlib.sha256(data).hexdigest()
 
 def auto_update():
-    print("🔎 Verificando atualização...")
     try:
-        with urllib.request.urlopen(SCRIPT_REPO_RAW, timeout=5) as r:
-            remote = r.read().decode("utf-8")
+        with urllib.request.urlopen(SCRIPT_REMOTE_RAW, timeout=8) as r:
+            remote_data = r.read()
 
-        if f"SCRIPT_VERSION = \"{SCRIPT_VERSION}\"" in remote:
-            return
+        with open(sys.argv[0], "rb") as f:
+            local_data = f.read()
 
-        if confirm("🚀 Nova versão disponível. Atualizar agora?"):
-            with open(sys.argv[0], "w", encoding="utf-8") as f:
-                f.write(remote)
-            print("✅ Atualizado! Reiniciando...")
+        if sha256(remote_data) == sha256(local_data):
+            return  # já está atualizado
+
+        print("🚀 Atualização disponível")
+        if confirm("Atualizar script agora?", True):
+            with open(sys.argv[0], "wb") as f:
+                f.write(remote_data)
+
+            print("✅ Script atualizado. Reiniciando...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
-    except:
-        print("⚠ Não foi possível verificar atualizações")
+
+    except Exception as e:
+        print("⚠ Não foi possível verificar atualização")
 
 # ================= GIT =================
 
@@ -124,6 +135,7 @@ def clone_repo(url):
     if os.path.exists(path):
         shutil.rmtree(path)
 
+    print(f"🌐 Clonando {url}")
     try:
         subprocess.check_call(["git", "clone", url, path])
     except:
@@ -133,6 +145,7 @@ def clone_repo(url):
     return os.path.abspath(path)
 
 def checkout(repo, ref):
+    print(f"🔀 Checkout: {ref}")
     try:
         subprocess.check_call(["git", "checkout", ref], cwd=repo)
         return True
@@ -190,14 +203,15 @@ def merge(base, source, output):
             else:
                 bt = read_file(d)
                 if bt != st:
-                    write_file(d,
+                    write_file(
+                        d,
                         "-- >>> BASE\n" + bt +
                         "\n-- === NOVO ===\n" + st +
                         "\n-- <<< FIM\n"
                     )
                     merged += 1
 
-    print(f"\n📊 Copiados: {copied}")
+    print(f"\n📊 Copiados : {copied}")
     print(f"📊 Mesclados: {merged}")
 
 # ================= WIZARD =================
@@ -205,19 +219,14 @@ def merge(base, source, output):
 def wizard(cfg=None):
     cfg = cfg or {}
 
-    cfg["mode"] = ask(
-        "Modo (1=normal, 2=branch vs branch)",
-        cfg.get("mode", "1")
-    )
-
+    cfg["mode"] = ask("Modo (1=normal, 2=branch vs branch)", cfg.get("mode", "1"))
     cfg["base"] = ask("BASE (caminho ou URL)", cfg.get("base"))
-    cfg["base_ref"] = ask("BASE branch/tag (vazio = atual)", cfg.get("base_ref", ""))
+    cfg["base_ref"] = ask("BASE branch/tag", cfg.get("base_ref", ""))
 
     cfg["source"] = ask("ORIGEM (caminho ou URL)", cfg.get("source"))
     cfg["source_ref"] = ask("ORIGEM branch/tag", cfg.get("source_ref"))
 
     cfg["output"] = ask("Pasta de saída", cfg.get("output", "merge_test"))
-
     return cfg
 
 # ================= MAIN =================
@@ -233,16 +242,14 @@ def main():
             "Configuração encontrada",
             [
                 "Usar opções anteriores",
-                "Editar opções (wizard)",
+                "Editar opções (repetir wizard)",
                 "Novo merge do zero"
             ]
         )
 
-        if c == 1:
-            pass
-        elif c == 2:
+        if c == 2:
             cfg = wizard(cfg)
-        else:
+        elif c == 3:
             cfg = wizard({})
     else:
         cfg = wizard({})
@@ -266,10 +273,10 @@ def main():
         else:
             return
 
-    if confirm("Confirmar merge?"):
+    if confirm("Confirmar merge?", True):
         merge(base, source, cfg["output"])
 
-    if os.path.exists(TMP_ROOT) and confirm("Apagar temporários?"):
+    if os.path.exists(TMP_ROOT) and confirm("Apagar temporários?", True):
         shutil.rmtree(TMP_ROOT)
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ def banner():
 * Local / GitHub / Codeberg
 * Branch / Tag / Branch vs Branch
 * Configuração persistente
-* Auto-update automático
+* Auto-update contínuo
 """)
 
 def menu(title, options, allow_exit=True):
@@ -57,7 +57,7 @@ def menu(title, options, allow_exit=True):
         print("❌ Opção inválida")
 
 def ask(msg, default=None):
-    if default is not None:
+    if default is not None and default != "":
         v = input(f"{msg} [{default}]: ").strip()
         return v if v else default
     return input(msg + ": ").strip()
@@ -98,7 +98,7 @@ def auto_update():
             local_data = f.read()
 
         if sha256(remote_data) == sha256(local_data):
-            return  # já está atualizado
+            return
 
         print("🚀 Atualização disponível")
         if confirm("Atualizar script agora?", True):
@@ -108,7 +108,7 @@ def auto_update():
             print("✅ Script atualizado. Reiniciando...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    except Exception as e:
+    except:
         print("⚠ Não foi possível verificar atualização")
 
 # ================= GIT =================
@@ -160,16 +160,6 @@ def checkout(repo, ref):
             print(f"❌ Branch/Tag '{ref}' não encontrada")
             return False
 
-def list_refs(repo):
-    branches = []
-    for l in run(["git", "branch", "-a"], cwd=repo).splitlines():
-        l = l.strip().replace("* ", "")
-        if "remotes/origin/" in l and "HEAD" not in l:
-            branches.append(l.replace("remotes/origin/", ""))
-
-    tags = run(["git", "tag"], cwd=repo).splitlines()
-    return sorted(set(branches)), sorted(tags)
-
 # ================= MERGE =================
 
 def read_file(p):
@@ -216,8 +206,8 @@ def merge(base, source, output):
 
 # ================= WIZARD =================
 
-def wizard(cfg=None):
-    cfg = cfg or {}
+def wizard(cfg):
+    print("\n📝 Revisar opções (Enter mantém valor atual)\n")
 
     cfg["mode"] = ask("Modo (1=normal, 2=branch vs branch)", cfg.get("mode", "1"))
     cfg["base"] = ask("BASE (caminho ou URL)", cfg.get("base"))
@@ -227,6 +217,7 @@ def wizard(cfg=None):
     cfg["source_ref"] = ask("ORIGEM branch/tag", cfg.get("source_ref"))
 
     cfg["output"] = ask("Pasta de saída", cfg.get("output", "merge_test"))
+
     return cfg
 
 # ================= MAIN =================
@@ -239,17 +230,16 @@ def main():
 
     if cfg:
         c = menu(
-            "Configuração encontrada",
+            "Configuração anterior encontrada",
             [
-                "Usar opções anteriores",
-                "Editar opções (repetir wizard)",
+                "Usar opções anteriores (editar uma a uma)",
                 "Novo merge do zero"
             ]
         )
 
-        if c == 2:
+        if c == 1:
             cfg = wizard(cfg)
-        elif c == 3:
+        else:
             cfg = wizard({})
     else:
         cfg = wizard({})

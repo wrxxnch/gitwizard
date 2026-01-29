@@ -18,18 +18,27 @@ def banner():
 * Merge seguro em pasta de teste
 """)
 
-def menu(title, options):
+def menu(title, options, allow_exit=True):
     print("\n" + title)
+
+    if allow_exit:
+        print("0) ❌ Sair")
+
     for i, opt in enumerate(options, 1):
         print(f"{i}) {opt}")
+
     while True:
         try:
             c = int(input("> "))
+            if allow_exit and c == 0:
+                print("\n👋 Saindo do Merge Wizard")
+                sys.exit(0)
             if 1 <= c <= len(options):
                 return c
         except:
             pass
         print("❌ Opção inválida")
+
 
 def ask(msg):
     return input(msg + ": ").strip().strip('"')

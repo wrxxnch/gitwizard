@@ -89,7 +89,7 @@ def save_cfg(cfg):
 def sha256(data: bytes):
     return hashlib.sha256(data).hexdigest()
 
-def auto_update():
+def check_update(force=False):
     try:
         with urllib.request.urlopen(SCRIPT_REMOTE_RAW, timeout=8) as r:
             remote_data = r.read()
@@ -98,18 +98,24 @@ def auto_update():
             local_data = f.read()
 
         if sha256(remote_data) == sha256(local_data):
-            return
+            if force:
+                print("✔ Script já está atualizado")
+            return False, None
 
-        print("🚀 Atualização disponível")
-        if confirm("Atualizar script agora?", True):
-            with open(sys.argv[0], "wb") as f:
-                f.write(remote_data)
-
-            print("✅ Script atualizado. Reiniciando...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-
+        return True, remote_data
     except:
-        print("⚠ Não foi possível verificar atualização")
+        if force:
+            print("⚠ Não foi possível verificar atualização")
+        return False, None
+
+
+def apply_update(remote_data):
+    with open(sys.argv[0], "wb") as f:
+        f.write(remote_data)
+
+    print("✅ Script atualizado. Reiniciando...")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 # ================= GIT =================
 

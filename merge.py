@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import sys
+import re
 
 TMP_ROOT = ".merge_wizard_tmp"
 
@@ -27,18 +28,25 @@ def menu(title, options, allow_exit=True):
     for i, opt in enumerate(options, 1):
         print(f"{i}) {opt}")
 
-    while True:
-        try:
-            c = int(input("> "))
-            if allow_exit and c == 0:
-                print("\n👋 Saindo do Merge Wizard")
-                sys.exit(0)
-            if 1 <= c <= len(options):
-                return c
-        except:
-            pass
-        print("❌ Opção inválida")
+    lookup = {opt.lower(): i for i, opt in enumerate(options, 1)}
 
+    while True:
+        c = input("> ").strip().lower()
+
+        if allow_exit and c in ("0", "sair", "exit", "q", "quit"):
+            print("\n👋 Saindo do Merge Wizard")
+            sys.exit(0)
+
+        if c.isdigit():
+            n = int(c)
+            if 1 <= n <= len(options):
+                return n
+        else:
+            for key, idx in lookup.items():
+                if c in key:
+                    return idx
+
+        print("❌ Opção inválida (número ou nome)")
 
 def ask(msg):
     return input(msg + ": ").strip().strip('"')
@@ -54,16 +62,48 @@ def run(cmd, cwd=None):
 def is_git_url(url):
     return url.startswith(("http://", "https://", "git@"))
 
+def parse_git_url(url):
+    """
+    Aceita URLs de página do GitHub / Codeberg
+    Retorna (repo_url, ref_ou_None)
+    """
+
+    # Codeberg: /src/branch/<branch>
+    m = re.match(r"(https?://[^/]+/[^/]+/[^/]+)/src/branch/([^/]+)", url)
+    if m:
+        return m.group(1) + ".git", m.group(2)
+
+    # GitHub: /tree/<branch>
+    m = re.match(r"(https?://github\.com/[^/]+/[^/]+)/tree/([^/]+)", url)
+    if m:
+        return m.group(1) + ".git", m.group(2)
+
+    # URL git normal
+    return url, None
+
 def clone_repo(url):
     os.makedirs(TMP_ROOT, exist_ok=True)
-    name = os.path.basename(url).replace(".git", "")
+
+    name = os.path.basename(url.rstrip("/")).replace(".git", "")
+    if not name:
+        name = "repo"
+
     path = os.path.join(TMP_ROOT, name)
 
     if os.path.exists(path):
         shutil.rmtree(path)
 
     print(f"🌐 Clonando {url}")
-    subprocess.check_call(["git", "clone", url, path])
+    try:
+        subprocess.check_call(
+            ["git", "clone", url, path],
+            stderr=subprocess.STDOUT
+        )
+    except subprocess.CalledProcessError:
+        print("❌ Falha ao clonar repositório")
+        print("👉 Verifique se a URL está correta ou se o repo é público")
+        return None
+
     return os.path.abspath(path)
 
 def list_branches(repo):
@@ -172,17 +212,26 @@ def get_source(label):
         p = ask("Digite o caminho local")
         if not os.path.exists(p):
             print("❌ Caminho inválido")
-            sys.exit(1)
+            return None
         return os.path.abspath(p)
 
-    url = ask("Digite a URL do repositório git")
-    if not is_git_url(url):
-        print("❌ URL inválida")
-        sys.exit(1)
+    url_raw = ask("Digite a URL do repositório git")
+    repo_url, auto_ref = parse_git_url(url_raw)
 
-    repo = clone_repo(url)
-    ref = select_ref(repo)
-    checkout(repo, ref)
+    if not is_git_url(repo_url):
+        print("❌ URL inválida")
+        return None
+
+    repo = clone_repo(repo_url)
+    if not repo:
+        return None
+
+    if auto_ref:
+        checkout(repo, auto_ref)
+    else:
+        ref = select_ref(repo)
+        checkout(repo, ref)
+
     return repo
 
 def main():
@@ -194,10 +243,14 @@ def main():
     )
 
     if mode == 2:
-        url = ask("URL do repositório")
-        repoA = clone_repo(url)
-        repoB = repoA + "_cmp"
+        url_raw = ask("URL do repositório")
+        repo_url, _ = parse_git_url(url_raw)
 
+        repoA = clone_repo(repo_url)
+        if not repoA:
+            return
+
+        repoB = repoA + "_cmp"
         shutil.copytree(repoA, repoB)
 
         print("\n🔹 Branch/TAG A")
@@ -212,20 +265,24 @@ def main():
         source = repoB
     else:
         base = get_source("BASE")
+        if not base:
+            return
         source = get_source("ORIGEM")
+        if not source:
+            return
 
     output = ask("\n📁 Pasta de SAÍDA (teste)")
     if not output:
         print("❌ Pasta inválida")
-        sys.exit(1)
+        return
 
     if os.path.exists(output):
         if not confirm("Pasta existe. Apagar?"):
-            sys.exit(0)
+            return
         shutil.rmtree(output)
 
     if not confirm("\nConfirmar merge seguro?"):
-        sys.exit(0)
+        return
 
     merge(base, source, output)
 

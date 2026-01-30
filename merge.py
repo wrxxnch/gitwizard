@@ -41,13 +41,14 @@ def safe_rmtree(path, retries=5, delay=0.5):
 def banner():
     print("""
 ========================================
-🧙 MERGE WIZARD v4.4
+🧙 MERGE WIZARD v4.5
 ========================================
 * Local / GitHub / Codeberg
-* Branch / Tag / Commit
-* Pull Request (não mergeado)
+* Várias branches / tags / commits
+* Vários Pull Requests (não mergeados)
+* Separados por vírgula
 * BASE soberana
-* Merge seguro para mods Lua
+* Código + imagens + assets
 * Windows-safe filesystem
 """)
 
@@ -95,7 +96,7 @@ def checkout(repo, ref):
     run(["git", "checkout", ref], cwd=repo)
 
 def checkout_pr(repo, pr_id):
-    print(f"🔀 Checkout Pull Request #{pr_id}")
+    print(f"🔀 Checkout PR #{pr_id}")
     run(
         ["git", "fetch", "origin", f"pull/{pr_id}/head:pr-{pr_id}"],
         cwd=repo
@@ -103,24 +104,17 @@ def checkout_pr(repo, pr_id):
     run(["git", "checkout", f"pr-{pr_id}"], cwd=repo)
 
 # ==========================================================
-# PR URL parser (AQUI está a correção chave)
+# PR / refs parser
 # ==========================================================
 
-def parse_pr_input(text):
-    """
-    Aceita:
-    - https://codeberg.org/user/repo/pulls/4090/files
-    - https://github.com/user/repo/pull/4090
-    - apenas '4090'
-    Retorna (repo_url, pr_id)
-    """
-    text = text.strip()
+def parse_list(text):
+    return [t.strip() for t in text.split(",") if t.strip()]
 
+def parse_pr_input(text):
     if text.isdigit():
         return None, text
 
     parts = text.rstrip("/").split("/")
-
     if "pulls" in parts:
         idx = parts.index("pulls")
     elif "pull" in parts:
@@ -128,9 +122,9 @@ def parse_pr_input(text):
     else:
         return text, None
 
-    pr_id = parts[idx + 1]
+    pr = parts[idx + 1]
     repo = "/".join(parts[:idx])
-    return repo + ".git", pr_id
+    return repo + ".git", pr
 
 # ==========================================================
 # File helpers
@@ -152,8 +146,14 @@ def write_file(path, content):
 # Merge logic
 # ==========================================================
 
+def is_binary_file(filename):
+    return os.path.splitext(filename)[1].lower() in {
+        ".png", ".jpg", ".jpeg", ".ogg", ".wav",
+        ".mp3", ".obj", ".mtl", ".blend",
+        ".dds", ".tga"
+    }
+
 def comment_prefix(filename):
-    ext = os.path.splitext(filename)[1].lower()
     return {
         ".lua": "--",
         ".py": "#",
@@ -164,7 +164,7 @@ def comment_prefix(filename):
         ".cpp": "//",
         ".h": "//",
         ".java": "//",
-    }.get(ext, "#")
+    }.get(os.path.splitext(filename)[1].lower(), "#")
 
 def smart_merge(base_txt, src_txt, filename):
     base_lines = base_txt.splitlines()
@@ -181,18 +181,14 @@ def smart_merge(base_txt, src_txt, filename):
     if not added:
         return base_txt, False
 
-    merged = (
+    return (
         base_txt.rstrip()
         + f"\n\n{prefix} ===== MERGE-WIZARD: linhas adicionadas =====\n"
         + "\n".join(added)
         + "\n"
-    )
-    return merged, True
+    ), True
 
-def merge(base, source, output):
-    print("\n📂 Copiando BASE → pasta de teste")
-    shutil.copytree(base, output)
-
+def apply_source(output, source):
     copied = merged = 0
 
     for root, _, files in os.walk(source):
@@ -203,39 +199,46 @@ def merge(base, source, output):
             src = os.path.join(root, f)
             dst = os.path.join(dest_dir, f)
 
-            src_txt = read_file(src)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
 
             if not os.path.exists(dst):
-                write_file(dst, src_txt)
+                shutil.copy2(src, dst)
                 copied += 1
                 print(f"[COPIADO] {dst}")
-            else:
-                base_txt = read_file(dst)
-                if base_txt == src_txt:
-                    continue
+                continue
 
-                merged_txt, changed = smart_merge(base_txt, src_txt, f)
-                if changed:
-                    write_file(dst, merged_txt)
-                    merged += 1
-                    print(f"[MERGED+] {dst}")
+            if is_binary_file(f):
+                shutil.copy2(src, dst)
+                merged += 1
+                print(f"[BINÁRIO ATUALIZADO] {dst}")
+                continue
 
-    print("\n📊 RELATÓRIO")
-    print(f"Arquivos copiados : {copied}")
-    print(f"Arquivos mesclados: {merged}")
+            base_txt = read_file(dst)
+            src_txt = read_file(src)
+
+            if base_txt == src_txt:
+                continue
+
+            merged_txt, changed = smart_merge(base_txt, src_txt, f)
+            if changed:
+                write_file(dst, merged_txt)
+                merged += 1
+                print(f"[MERGED+] {dst}")
+
+    return copied, merged
 
 # ==========================================================
 # Wizard
 # ==========================================================
 
-def get_source(label):
+def get_sources(label):
     print(f"\n📌 Selecionar {label}")
     opt = menu(
         f"Tipo de {label}",
         [
             "Caminho local",
-            "Git (branch / tag / commit)",
-            "Pull Request (não mergeado)",
+            "Git (branches / tags / commits)",
+            "Pull Requests (não mergeados)",
         ]
     )
 
@@ -243,28 +246,28 @@ def get_source(label):
         p = ask("Digite o caminho local")
         if not os.path.exists(p):
             sys.exit("❌ Caminho inválido")
-        return os.path.abspath(p)
+        return [("local", p)]
+
+    repo_url = ask("URL do repositório git")
+    repo = clone_repo(repo_url)
+
+    sources = []
 
     if opt == 2:
-        repo_url = ask("URL do repositório git")
-        repo = clone_repo(repo_url)
-        ref = ask("Branch / tag / commit")
-        checkout(repo, ref)
-        return repo
+        refs = parse_list(ask("Branches / tags / commits (separados por vírgula)"))
+        for ref in refs:
+            checkout(repo, ref)
+            sources.append(("git", repo))
+    else:
+        prs = parse_list(ask("IDs ou links de PR (separados por vírgula)"))
+        for raw in prs:
+            _, pr = parse_pr_input(raw)
+            if not pr:
+                sys.exit(f"❌ PR inválido: {raw}")
+            checkout_pr(repo, pr)
+            sources.append(("git", repo))
 
-    # ---- Pull Request ----
-    raw = ask("Cole o LINK do PR ou apenas o ID")
-    repo_url, pr = parse_pr_input(raw)
-
-    if not pr:
-        sys.exit("❌ Pull Request inválido")
-
-    if not repo_url:
-        repo_url = ask("URL do repositório git")
-
-    repo = clone_repo(repo_url)
-    checkout_pr(repo, pr)
-    return repo
+    return sources
 
 # ==========================================================
 # Main
@@ -273,8 +276,8 @@ def get_source(label):
 def main():
     banner()
 
-    base = get_source("BASE")
-    source = get_source("ORIGEM")
+    base_list = get_sources("BASE")
+    base_type, base_path = base_list[0]
 
     output = ask("\n📁 Pasta de SAÍDA (teste)")
     if not output:
@@ -285,10 +288,20 @@ def main():
             sys.exit(0)
         safe_rmtree(output)
 
-    if not confirm("\nConfirmar merge seguro?"):
-        sys.exit(0)
+    print("\n📂 Copiando BASE → pasta de teste")
+    shutil.copytree(base_path, output)
 
-    merge(base, source, output)
+    origin_sources = get_sources("ORIGEM")
+
+    total_copied = total_merged = 0
+    for _, src in origin_sources:
+        c, m = apply_source(output, src)
+        total_copied += c
+        total_merged += m
+
+    print("\n📊 RELATÓRIO FINAL")
+    print(f"Arquivos copiados : {total_copied}")
+    print(f"Arquivos mesclados: {total_merged}")
 
     print("\n✅ Merge finalizado")
     print("🧪 Teste em:", output)

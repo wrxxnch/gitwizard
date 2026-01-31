@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import stat
+import difflib
 
 TMP_ROOT = ".merge_wizard_tmp"
 
@@ -41,14 +42,13 @@ def safe_rmtree(path, retries=5, delay=0.5):
 def banner():
     print("""
 ========================================
-🧙 MERGE WIZARD v4.5
+🧙 MERGE WIZARD v4.5 (Filtered Diff)
 ========================================
 * Local / GitHub / Codeberg
 * Várias branches / tags / commits
 * Vários Pull Requests (não mergeados)
-* Separados por vírgula
-* BASE soberana
-* Código + imagens + assets
+* Saída: APENAS arquivos novos ou modificados
+* Diferença de linhas (diff) para código
 * Windows-safe filesystem
 """)
 
@@ -153,77 +153,86 @@ def is_binary_file(filename):
         ".dds", ".tga"
     }
 
-def comment_prefix(filename):
-    return {
-        ".lua": "--",
-        ".py": "#",
-        ".sh": "#",
-        ".js": "//",
-        ".ts": "//",
-        ".c": "//",
-        ".cpp": "//",
-        ".h": "//",
-        ".java": "//",
-    }.get(os.path.splitext(filename)[1].lower(), "#")
+def is_code_file(filename):
+    code_extensions = {
+        '.py', '.js', '.ts', '.html', '.css', '.c', '.cpp', '.h', 
+        '.java', '.go', '.rs', '.php', '.rb', '.sh', '.sql', '.md', '.json', '.xml', '.lua'
+    }
+    return os.path.splitext(filename)[1].lower() in code_extensions
 
-def smart_merge(base_txt, src_txt, filename):
-    base_lines = base_txt.splitlines()
-    src_lines = src_txt.splitlines()
+def get_line_diff(old_txt, new_txt):
+    diff = difflib.unified_diff(
+        old_txt.splitlines(keepends=True),
+        new_txt.splitlines(keepends=True),
+        fromfile='BASE',
+        tofile='NOVO',
+        n=3
+    )
+    return "".join(diff)
 
-    base_set = set(l.strip() for l in base_lines if l.strip())
-    prefix = comment_prefix(filename)
-
-    added = []
-    for line in src_lines:
-        if line.strip() and line.strip() not in base_set:
-            added.append(f"{prefix} [MERGE-WIZARD ADD]\n{line}")
-
-    if not added:
-        return base_txt, False
-
-    return (
-        base_txt.rstrip()
-        + f"\n\n{prefix} ===== MERGE-WIZARD: linhas adicionadas =====\n"
-        + "\n".join(added)
-        + "\n"
-    ), True
-
-def apply_source(output, source):
+def apply_source(output, base_dir, source):
     copied = merged = 0
 
     for root, _, files in os.walk(source):
+        if '.git' in root:
+            continue
+            
         rel = os.path.relpath(root, source)
-        dest_dir = os.path.join(output, rel) if rel != "." else output
-
+        
         for f in files:
-            src = os.path.join(root, f)
-            dst = os.path.join(dest_dir, f)
+            if f.startswith('.git'): continue
+            
+            src_path = os.path.join(root, f)
+            base_path = os.path.join(base_dir, rel, f)
+            dst_path = os.path.join(output, rel, f)
 
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            src_txt_raw = None # Cache para leitura se necessário
 
-            if not os.path.exists(dst):
-                shutil.copy2(src, dst)
+            # 1. NOVO: Arquivo não existe na base
+            if not os.path.exists(base_path):
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                shutil.copy2(src_path, dst_path)
                 copied += 1
-                print(f"[COPIADO] {dst}")
+                print(f"[NOVO] {rel}/{f}")
                 continue
 
+            # 2. EXISTE: Comparar
             if is_binary_file(f):
-                shutil.copy2(src, dst)
+                # Comparação binária simples por hash ou apenas copia se quiser sempre o novo
+                # Aqui vamos copiar se forem diferentes (usando stat para rapidez ou apenas copiar)
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                shutil.copy2(src_path, dst_path)
                 merged += 1
-                print(f"[BINÁRIO ATUALIZADO] {dst}")
+                print(f"[BINÁRIO ATUALIZADO] {rel}/{f}")
                 continue
 
-            base_txt = read_file(dst)
-            src_txt = read_file(src)
+            base_txt = read_file(base_path)
+            src_txt = read_file(src_path)
 
             if base_txt == src_txt:
                 continue
 
-            merged_txt, changed = smart_merge(base_txt, src_txt, f)
-            if changed:
-                write_file(dst, merged_txt)
-                merged += 1
-                print(f"[MERGED+] {dst}")
+            # 3. DIFERENTES: Processar mesclagem na pasta de saída
+            merged += 1
+            if is_code_file(f):
+                diff_txt = get_line_diff(base_txt, src_txt)
+                if diff_txt:
+                    write_file(dst_path, diff_txt)
+                    print(f"[DIFF] {rel}/{f}")
+                else:
+                    write_file(dst_path, src_txt)
+                    print(f"[ATUALIZADO] {rel}/{f}")
+            else:
+                # Fallback para outros tipos de texto (bloco de merge)
+                merged_txt = (
+                    "-- >>>>>>>>>> BASE (antigo)\n"
+                    + base_txt +
+                    "\n-- ========= NOVO =========\n"
+                    + src_txt +
+                    "\n-- <<<<<<<<<< FIM MERGE\n"
+                )
+                write_file(dst_path, merged_txt)
+                print(f"[MERGE] {rel}/{f}")
 
     return copied, merged
 
@@ -279,32 +288,34 @@ def main():
     base_list = get_sources("BASE")
     base_type, base_path = base_list[0]
 
-    output = ask("\n📁 Pasta de SAÍDA (teste)")
+    output = ask("\n📁 Pasta de SAÍDA (apenas alterados)")
     if not output:
         sys.exit(1)
 
     if os.path.exists(output):
-        if not confirm("Pasta existe. Apagar?"):
+        if not confirm(f"Pasta '{output}' existe. Apagar?"):
             sys.exit(0)
         safe_rmtree(output)
-
-    print("\n📂 Copiando BASE → pasta de teste")
-    shutil.copytree(base_path, output)
+    
+    os.makedirs(output, exist_ok=True)
 
     origin_sources = get_sources("ORIGEM")
 
     total_copied = total_merged = 0
     for _, src in origin_sources:
-        c, m = apply_source(output, src)
+        c, m = apply_source(output, base_path, src)
         total_copied += c
         total_merged += m
 
-    print("\n📊 RELATÓRIO FINAL")
-    print(f"Arquivos copiados : {total_copied}")
-    print(f"Arquivos mesclados: {total_merged}")
+    print("\n📊 RELATÓRIO FINAL (Apenas alterações)")
+    print(f"Arquivos novos: {total_copied}")
+    print(f"Arquivos modificados: {total_merged}")
 
-    print("\n✅ Merge finalizado")
-    print("🧪 Teste em:", output)
+    if total_copied == 0 and total_merged == 0:
+        print("⚠ Nenhuma diferença encontrada.")
+
+    print("\n✅ Processo finalizado")
+    print("🧪 Arquivos em:", output)
 
     if os.path.exists(TMP_ROOT) and confirm("\nApagar temporários?"):
         safe_rmtree(TMP_ROOT)
